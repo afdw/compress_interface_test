@@ -62,7 +62,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
             _ => {}
-        }
+        };
         this.read_data
             .borrow_mut()
             .push_back(Cursor::new(buf.to_owned()));
@@ -70,31 +70,31 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if self.backlog.len() != self.pos {
-            let poll =
-                Pin::new(&mut *self.target.borrow_mut()).poll_write(cx, &self.backlog[self.pos..]);
-            match poll {
-                Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
-                Poll::Ready(Ok(n)) => self.pos += n,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => return Poll::Pending,
-            };
-        }
-        let mut data = [0; BUF_SIZE];
-        match self
-            .read_result
-            .as_mut()
-            .poll_read(&mut Context::from_waker(&noop_waker()), &mut data)
-        {
-            Poll::Ready(Ok(0)) => Poll::Ready(Ok(())),
-            Poll::Ready(Ok(n)) => {
-                self.backlog = data[0..n].to_owned();
-                self.pos = 0;
-                cx.waker().wake_by_ref();
-                Poll::Pending
+        loop {
+            while self.backlog.len() != self.pos {
+                let poll = Pin::new(&mut *self.target.borrow_mut())
+                    .poll_write(cx, &self.backlog[self.pos..]);
+                match poll {
+                    Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Ok(n)) => self.pos += n,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Pending => return Poll::Pending,
+                };
             }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Ready(Ok(())),
+            let mut data = [0; BUF_SIZE];
+            match self
+                .read_result
+                .as_mut()
+                .poll_read(&mut Context::from_waker(&noop_waker()), &mut data)
+            {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Ok(n)) => {
+                    self.backlog = data[0..n].to_owned();
+                    self.pos = 0;
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Ready(Ok(())),
+            }
         }
     }
 
