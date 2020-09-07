@@ -18,6 +18,8 @@ pub fn uncompress_data_read(source: impl AsyncRead) -> impl AsyncRead {
     // ...
 }
 
+const BUF_SIZE: usize = 1024;
+
 struct AsyncReadImpl {
     read_data: Rc<RefCell<VecDeque<u8>>>,
 }
@@ -42,10 +44,11 @@ impl AsyncRead for AsyncReadImpl {
 }
 
 struct AsyncWriteImpl<W: AsyncWrite + Unpin> {
-    target: W,
+    target: RefCell<W>,
     read_data: Rc<RefCell<VecDeque<u8>>>,
     read_result: Pin<Box<dyn AsyncRead>>,
-    backlog: Option<u8>,
+    backlog: Vec<u8>,
+    pos: usize,
 }
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
@@ -55,8 +58,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
         let mut this = Pin::into_inner(self);
-        if Pin::new(&mut this).poll_flush(cx).is_pending() {
-            return Poll::Pending;
+        match Pin::new(&mut this).poll_flush(cx) {
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+            _ => {}
         }
         for &i in buf {
             this.read_data.borrow_mut().push_back(i);
@@ -65,14 +70,17 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if let Some(v) = self.backlog {
-            match Pin::new(&mut self.target).poll_write(cx, &[v]) {
-                Poll::Ready(Ok(1)) => self.backlog = None,
+        if self.backlog.len() != self.pos {
+            let poll =
+                Pin::new(&mut *self.target.borrow_mut()).poll_write(cx, &self.backlog[self.pos..]);
+            match poll {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Ok(n)) => self.pos += n,
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
-                _ => unreachable!(),
             };
         }
-        let mut data = [0];
+        let mut data = [0; BUF_SIZE];
         match self
             .read_result
             .as_mut()
@@ -80,12 +88,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
         {
             Poll::Pending => Poll::Ready(Ok(())),
             Poll::Ready(Ok(0)) => Poll::Ready(Ok(())),
-            Poll::Ready(Ok(1)) => {
-                self.backlog = Some(data[0]);
+            Poll::Ready(Ok(n)) => {
+                self.backlog = data[0..n].to_owned();
+                self.pos = 0;
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            _ => unreachable!(),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
         }
     }
 
@@ -97,10 +106,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
 pub fn uncompress_data_write(target: impl AsyncWrite + Unpin) -> impl AsyncWrite {
     let read_data = Rc::new(RefCell::new(VecDeque::new()));
     AsyncWriteImpl {
-        target,
+        target: RefCell::new(target),
         read_data: read_data.clone(),
         read_result: Box::pin(uncompress_data_read(AsyncReadImpl { read_data })),
-        backlog: None,
+        backlog: vec![],
+        pos: 0,
     }
 }
 
