@@ -43,15 +43,17 @@ impl AsyncRead for AsyncReadImpl {
     }
 }
 
-struct AsyncWriteImpl<W: AsyncWrite + Unpin> {
-    target: RefCell<W>,
+struct AsyncWriteImpl<W: AsyncWrite> {
+    target: RefCell<Pin<Box<W>>>,
     read_data: Rc<RefCell<VecDeque<Cursor<Vec<u8>>>>>,
     read_result: Pin<Box<dyn AsyncRead>>,
     backlog: Vec<u8>,
     pos: usize,
 }
 
-impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
+impl<W: AsyncWrite> Unpin for AsyncWriteImpl<W> {}
+
+impl<W: AsyncWrite> AsyncWrite for AsyncWriteImpl<W> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -72,7 +74,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         loop {
             while self.backlog.len() != self.pos {
-                let poll = Pin::new(&mut *self.target.borrow_mut())
+                let poll = self
+                    .target
+                    .borrow_mut()
+                    .as_mut()
                     .poll_write(cx, &self.backlog[self.pos..]);
                 match poll {
                     Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
@@ -103,10 +108,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
     }
 }
 
-pub fn uncompress_data_write(target: impl AsyncWrite + Unpin) -> impl AsyncWrite {
+pub fn uncompress_data_write(target: impl AsyncWrite) -> impl AsyncWrite {
     let read_data = Rc::new(RefCell::new(VecDeque::new()));
     AsyncWriteImpl {
-        target: RefCell::new(target),
+        target: RefCell::new(Box::pin(target)),
         read_data: read_data.clone(),
         read_result: Box::pin(uncompress_data_read(AsyncReadImpl { read_data })),
         backlog: vec![],
