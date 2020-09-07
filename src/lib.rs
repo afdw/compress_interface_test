@@ -94,7 +94,7 @@ impl<W: AsyncWrite> AsyncWrite for AsyncWriteImpl<W> {
             {
                 Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
                 Poll::Ready(Ok(n)) => {
-                    self.backlog = data[0..n].to_owned();
+                    self.backlog = data[..n].to_owned();
                     self.pos = 0;
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
