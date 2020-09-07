@@ -1,11 +1,11 @@
 use futures::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, Cursor},
     task::noop_waker,
 };
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    io::{Error, Write},
+    io::Error,
     pin::Pin,
     rc::Rc,
     result::Result,
@@ -21,31 +21,32 @@ pub fn uncompress_data_read(source: impl AsyncRead) -> impl AsyncRead {
 const BUF_SIZE: usize = 1024;
 
 struct AsyncReadImpl {
-    read_data: Rc<RefCell<VecDeque<u8>>>,
+    read_data: Rc<RefCell<VecDeque<Cursor<Vec<u8>>>>>,
 }
 
 impl AsyncRead for AsyncReadImpl {
     fn poll_read(
         self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        mut buf: &mut [u8],
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
-        if self.read_data.borrow().is_empty() {
-            Poll::Pending
-        } else {
-            let len = usize::min(self.read_data.borrow().len(), buf.len());
-            for _ in 0..len {
-                buf.write_all(&[self.read_data.borrow_mut().pop_front().unwrap()])
-                    .unwrap();
+        while !self.read_data.borrow().is_empty() {
+            let mut read_data = self.read_data.borrow_mut();
+            let data = read_data.front_mut().unwrap();
+            let res = Pin::new(&mut *data).poll_read(cx, buf);
+            if let Poll::Ready(Ok(0)) = res {
+                read_data.pop_front();
+            } else {
+                return res;
             }
-            Poll::Ready(Ok(len))
         }
+        Poll::Pending
     }
 }
 
 struct AsyncWriteImpl<W: AsyncWrite + Unpin> {
     target: RefCell<W>,
-    read_data: Rc<RefCell<VecDeque<u8>>>,
+    read_data: Rc<RefCell<VecDeque<Cursor<Vec<u8>>>>>,
     read_result: Pin<Box<dyn AsyncRead>>,
     backlog: Vec<u8>,
     pos: usize,
@@ -63,9 +64,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
             Poll::Pending => return Poll::Pending,
             _ => {}
         }
-        for &i in buf {
-            this.read_data.borrow_mut().push_back(i);
-        }
+        this.read_data
+            .borrow_mut()
+            .push_back(Cursor::new(buf.to_owned()));
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -116,14 +117,12 @@ pub fn uncompress_data_write(target: impl AsyncWrite + Unpin) -> impl AsyncWrite
 
 #[test]
 fn simple() {
-    use futures::{executor::block_on, io::Cursor};
-
     let mut input = (0..=255)
         .cycle()
         .take(1024 * 1024 + 123)
         .collect::<Vec<_>>();
     let mut output = vec![];
-    block_on(futures::io::copy(
+    futures::executor::block_on(futures::io::copy(
         Cursor::new(&mut input),
         &mut uncompress_data_write(&mut output),
     ))
