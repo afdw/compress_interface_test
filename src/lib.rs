@@ -87,7 +87,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
             .as_mut()
             .poll_read(&mut Context::from_waker(&noop_waker()), &mut data)
         {
-            Poll::Pending => Poll::Ready(Ok(())),
             Poll::Ready(Ok(0)) => Poll::Ready(Ok(())),
             Poll::Ready(Ok(n)) => {
                 self.backlog = data[0..n].to_owned();
@@ -96,6 +95,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncWriteImpl<W> {
                 Poll::Pending
             }
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Ready(Ok(())),
         }
     }
 
