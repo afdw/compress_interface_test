@@ -30,9 +30,8 @@ impl AsyncRead for AsyncReadImpl {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
-        while !self.read_data.borrow().is_empty() {
-            let mut read_data = self.read_data.borrow_mut();
-            let data = read_data.front_mut().unwrap();
+        let mut read_data = self.read_data.borrow_mut();
+        while let Some(data) = read_data.front_mut() {
             let res = Pin::new(&mut *data).poll_read(cx, buf);
             if let Poll::Ready(Ok(0)) = res {
                 read_data.pop_front();
